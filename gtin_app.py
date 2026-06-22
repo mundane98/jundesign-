@@ -620,7 +620,7 @@ if up is not None and class_ready:
     target = sel_products if sel_products else products
 
     # 각 옵션 파싱 -----------------------------------------------------------
-    #   성별: 옵션명에 여성/남성 있으면 그대로, 없으면 '남성' 기본.
+    #   성별: 옵션명에 여성/남성 있으면 그대로, 없으면 사이즈 기준.
     #   분류코드: 성별에 따라 사이드바의 여성/남성 기본분류를 적용.
     parsed_rows = []
     for r in rows:
@@ -633,6 +633,7 @@ if up is not None and class_ready:
         gender = decide_gender(p, women_max=women_max)
         class_code = women_class if gender == "여성" else men_class
         parsed_rows.append({
+            "✓": False,
             "상품명": r["product"],
             "옵션명": r["option"],
             "쿠팡전용": "Y" if r.get("coupang_only") else "",
@@ -651,10 +652,18 @@ if up is not None and class_ready:
             "메모": p["note"],
         })
 
-    df = pd.DataFrame(parsed_rows)
-    if df.empty:
+    base_df = pd.DataFrame(parsed_rows)
+    if base_df.empty:
         st.info("선택된 상품의 옵션이 없습니다.")
         st.stop()
+
+    # 설정 시그니처: 입력이나 옵션이 바뀌면 작업본을 새로 만든다(편집 보존).
+    sig = (up.name, mode, tuple(target), women_class, men_class,
+           int(women_max), len(base_df))
+    if st.session_state.get("_df_sig") != sig:
+        st.session_state["_df_sig"] = sig
+        st.session_state["_work_df"] = base_df.copy()
+    df = st.session_state["_work_df"]
 
     ok_n = (df["상태"] == "OK").sum()
     ng_n = (df["상태"] == "확인필요").sum()
@@ -671,75 +680,41 @@ if up is not None and class_ready:
     women_label = CODE2LABEL.get(women_class, women_class)
     men_label = CODE2LABEL.get(men_class, men_class)
 
-    def _kw_mask(keyword):
-        if keyword:
-            return df["옵션명"].str.contains(keyword, case=False, na=False)
-        return df.index >= 0
+    def label2code(label):
+        if not label:
+            return ""
+        return str(label).split(" | ")[0].strip()
 
-    # 일괄 수정 ------------------------------------------------------------
-    tab_g, tab_c = st.tabs(["성별 일괄 수정", "색상코드 일괄 수정"])
+    def classlabel2code(label):
+        if not label:
+            return ""
+        return str(label).split("  |  ")[0].strip()
 
-    with tab_g:
-        st.caption("키워드가 든 옵션의 성별을 한 번에 변경 (분류도 자동 전환)")
-        bc1, bc2, bc3 = st.columns([2, 1, 1])
-        kw_g = bc1.text_input("색상/옵션 키워드 (예: 화이트그린, 핑크)",
-                              key="bulk_kw_g", placeholder="비우면 전체 대상")
-        to_gender = bc2.selectbox("→ 성별", ["여성", "남성"], key="bulk_g")
-        if bc3.button("성별 적용", use_container_width=True, key="btn_g"):
-            mask = _kw_mask(kw_g)
-            df.loc[mask, "성별"] = to_gender
-            df["상품분류코드"] = df["성별"].map(
-                lambda g: women_class if g == "여성" else men_class)
-            st.session_state["_bulk_g_msg"] = \
-                f"{int(mask.sum())}개 행을 '{to_gender}'으로 변경했습니다."
-        if st.session_state.get("_bulk_g_msg"):
-            st.caption("✔ " + st.session_state["_bulk_g_msg"])
+    st.caption("표에서 **맨 왼쪽 ✓** 를 체크한 뒤 아래 패널에서 일괄 변경할 수 있어요. "
+               "개별 셀은 표에서 직접 수정해도 됩니다.")
 
-    with tab_c:
-        st.caption("키워드가 든 옵션의 색상코드를 한 번에 지정 "
-                   "(색상 인식 실패 행 보정에 유용)")
-        cc1, cc2, cc3 = st.columns([2, 2, 1])
-        kw_c = cc1.text_input("색상/옵션 키워드 (예: 단종, 카키, 밀리터리)",
-                              key="bulk_kw_c", placeholder="비우면 전체 대상")
-        color_pick = cc2.selectbox("→ 색상코드", color_options[1:], key="bulk_c")
-        if cc3.button("색상 적용", use_container_width=True, key="btn_c"):
-            mask = _kw_mask(kw_c)
-            code = color_pick.split(" | ")[0].strip()
-            name = color_pick.split(" | ")[1].strip() if " | " in color_pick else ""
-            df.loc[mask, "색상코드"] = code
-            df.loc[mask, "색상영문"] = name
-            # 상태 갱신(색상+사이즈 모두 있으면 OK)
-            df["상태"] = df.apply(
-                lambda r: "OK" if (r["색상코드"] and r["사이즈코드"]) else "확인필요",
-                axis=1)
-            st.session_state["_bulk_c_msg"] = \
-                f"{int(mask.sum())}개 행의 색상코드를 '{color_pick}'로 지정했습니다."
-        if st.session_state.get("_bulk_c_msg"):
-            st.caption("✔ " + st.session_state["_bulk_c_msg"])
-
-    # 편집용 컬럼 추가
+    # 편집용 표(✓ 포함) ----------------------------------------------------
     df_edit = df.copy()
     df_edit["색상코드_선택"] = df_edit["색상코드"].map(
         lambda x: color_code2label.get(x, ""))
     df_edit["사이즈코드_선택"] = df_edit["사이즈코드"].map(
         lambda x: size_code2label.get(x, ""))
-    # 분류 표시: 직접지정 가능하도록 라벨로
     df_edit["분류_선택"] = df_edit["상품분류코드"].map(
         lambda x: CODE2LABEL.get(x, x))
 
     edited = st.data_editor(
-        df_edit[["상품명", "옵션명", "상태", "성별", "분류_선택",
+        df_edit[["✓", "상품명", "옵션명", "상태", "성별", "분류_선택",
                  "상세상품명", "모델명",
                  "색상(인식)", "색상코드_선택",
                  "사이즈", "사이즈코드_선택", "메모"]],
         column_config={
+            "✓": st.column_config.CheckboxColumn("✓", width="small",
+                help="일괄 변경할 행 선택"),
             "성별": st.column_config.SelectboxColumn(
-                "성별", options=["여성", "남성"], width="small",
-                help="바꾸면 분류가 여성/남성 기본분류로 자동 전환됩니다."),
+                "성별", options=["여성", "남성"], width="small"),
             "분류_선택": st.column_config.SelectboxColumn(
                 "상품분류", options=[women_label, men_label] + all_labels,
-                width="large",
-                help="기본은 성별에 연동. 다른 분류로 직접 지정도 가능."),
+                width="large"),
             "색상코드_선택": st.column_config.SelectboxColumn(
                 "색상코드", options=color_options, width="medium"),
             "사이즈코드_선택": st.column_config.SelectboxColumn(
@@ -759,43 +734,85 @@ if up is not None and class_ready:
         key="editor",
     )
 
-    # 선택값 -> 코드 반영
-    def label2code(label):
-        if not label:
-            return ""
-        return str(label).split(" | ")[0].strip()
-
-    def classlabel2code(label):
-        # "코드  |  대>중>소>세" 형식에서 코드만
-        if not label:
-            return ""
-        return str(label).split("  |  ")[0].strip()
-
-    final = df.copy()
-    final["성별"] = edited["성별"].values
-    final["색상코드"] = edited["색상코드_선택"].map(label2code).values
-    final["사이즈코드"] = edited["사이즈코드_선택"].map(label2code).values
-
-    # 분류코드: 에디터에서 직접 고른 값을 우선 반영.
-    #   행의 성별이 표 안에서 바뀌었는데 분류는 안 건드렸다면,
-    #   기존(여성/남성 기본) 라벨과 일치할 때만 성별에 맞춰 자동 전환.
-    edited_class_codes = edited["분류_선택"].map(classlabel2code).values
+    # 에디터에서 편집·체크된 내용을 작업본(df)에 즉시 반영(편집 보존)
+    df["✓"] = edited["✓"].values
+    df["성별"] = edited["성별"].values
+    df["색상코드"] = edited["색상코드_선택"].map(label2code).values
+    df["사이즈코드"] = edited["사이즈코드_선택"].map(label2code).values
+    # 색상영문도 코드에 맞춰 갱신
+    df["색상영문"] = df["색상코드"].map(lambda c: COLOR_CODE2NAME.get(c, ""))
+    # 분류: 직접 고른 라벨 우선, 기본 2개면 성별 따라감
     new_codes = []
-    for i, row in enumerate(edited.itertuples(index=False)):
-        g = row.성별
-        picked = edited_class_codes[i]
+    for i in range(len(edited)):
+        g = edited["성별"].iloc[i]
+        picked = classlabel2code(edited["분류_선택"].iloc[i])
         default_for_g = women_class if g == "여성" else men_class
-        other_default = men_class if g == "여성" else women_class
-        # 사용자가 기본 2개(여성/남성) 중 하나를 그대로 두고 성별만 바꾼 경우 → 성별 따라감
         if picked in (women_class, men_class):
             new_codes.append(default_for_g)
         else:
             new_codes.append(picked or default_for_g)
-    final["상품분류코드"] = new_codes
+    df["상품분류코드"] = new_codes
+    df["상태"] = df.apply(
+        lambda r: "OK" if (r["색상코드"] and r["사이즈코드"]) else "확인필요", axis=1)
+    st.session_state["_work_df"] = df
+
+    # 선택 행 일괄 적용 패널 -----------------------------------------------
+    n_checked = int(df["✓"].sum())
+    with st.container(border=True):
+        st.markdown(f"**☑ 선택된 {n_checked}개 행에 일괄 적용**")
+        if n_checked == 0:
+            st.caption("표에서 ✓를 먼저 선택하세요.")
+        ap1, ap2, ap3, ap4 = st.columns(4)
+
+        with ap1:
+            g_val = st.selectbox("성별", ["(변경 안 함)", "여성", "남성"], key="ap_g")
+        with ap2:
+            c_val = st.selectbox("색상코드", ["(변경 안 함)"] + color_options[1:],
+                                 key="ap_c")
+        with ap3:
+            s_val = st.selectbox("사이즈코드", ["(변경 안 함)"] + size_options[1:],
+                                 key="ap_s")
+        with ap4:
+            cls_val = st.selectbox("상품분류",
+                                   ["(변경 안 함)", women_label, men_label] + all_labels,
+                                   key="ap_cls")
+
+        col_apply, col_clear = st.columns([1, 1])
+        if col_apply.button("선택 행에 적용", type="primary",
+                            use_container_width=True, disabled=(n_checked == 0)):
+            m = df["✓"] == True
+            if g_val != "(변경 안 함)":
+                df.loc[m, "성별"] = g_val
+                # 성별 바꾸면 분류도 기본분류로 전환(분류를 따로 안 정했을 때)
+                if cls_val == "(변경 안 함)":
+                    df.loc[m, "상품분류코드"] = df.loc[m, "성별"].map(
+                        lambda g: women_class if g == "여성" else men_class)
+            if c_val != "(변경 안 함)":
+                code = label2code(c_val)
+                df.loc[m, "색상코드"] = code
+                df.loc[m, "색상영문"] = COLOR_CODE2NAME.get(code, "")
+            if s_val != "(변경 안 함)":
+                df.loc[m, "사이즈코드"] = label2code(s_val)
+            if cls_val != "(변경 안 함)":
+                df.loc[m, "상품분류코드"] = classlabel2code(cls_val)
+            df["상태"] = df.apply(
+                lambda r: "OK" if (r["색상코드"] and r["사이즈코드"]) else "확인필요",
+                axis=1)
+            df["✓"] = False   # 적용 후 체크 해제
+            st.session_state["_work_df"] = df
+            st.rerun()
+
+        if col_clear.button("선택 해제", use_container_width=True,
+                            disabled=(n_checked == 0)):
+            df["✓"] = False
+            st.session_state["_work_df"] = df
+            st.rerun()
+
+    final = df.copy()
 
     remaining = ((final["색상코드"] == "") | (final["사이즈코드"] == "")).sum()
     if remaining:
-        st.warning(f"아직 코드가 비어있는 행 {remaining}개 — 위 표에서 직접 선택하세요.")
+        st.warning(f"아직 코드가 비어있는 행 {remaining}개 — 표 또는 위 패널에서 채우세요.")
 
     st.subheader("6. 다운로드")
     with st.spinner("GTIN 템플릿(.xls) 생성 중…"):
