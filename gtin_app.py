@@ -671,24 +671,51 @@ if up is not None and class_ready:
     women_label = CODE2LABEL.get(women_class, women_class)
     men_label = CODE2LABEL.get(men_class, men_class)
 
+    def _kw_mask(keyword):
+        if keyword:
+            return df["옵션명"].str.contains(keyword, case=False, na=False)
+        return df.index >= 0
+
     # 일괄 수정 ------------------------------------------------------------
-    with st.container(border=True):
-        st.markdown("**🔧 성별 일괄 수정** — 특정 색상이 든 옵션을 한 번에 변경")
+    tab_g, tab_c = st.tabs(["성별 일괄 수정", "색상코드 일괄 수정"])
+
+    with tab_g:
+        st.caption("키워드가 든 옵션의 성별을 한 번에 변경 (분류도 자동 전환)")
         bc1, bc2, bc3 = st.columns([2, 1, 1])
-        kw = bc1.text_input("색상/옵션 키워드 (예: 화이트그린, 핑크)",
-                            key="bulk_kw",
-                            placeholder="비우면 전체 대상")
+        kw_g = bc1.text_input("색상/옵션 키워드 (예: 화이트그린, 핑크)",
+                              key="bulk_kw_g", placeholder="비우면 전체 대상")
         to_gender = bc2.selectbox("→ 성별", ["여성", "남성"], key="bulk_g")
-        if bc3.button("일괄 적용", use_container_width=True):
-            mask = df["옵션명"].str.contains(kw, case=False, na=False) if kw else df.index >= 0
+        if bc3.button("성별 적용", use_container_width=True, key="btn_g"):
+            mask = _kw_mask(kw_g)
             df.loc[mask, "성별"] = to_gender
-            n = int(mask.sum())
-            st.session_state["_bulk_msg"] = f"{n}개 행을 '{to_gender}'으로 변경했습니다."
-            # 성별에 맞춰 분류코드 재계산
             df["상품분류코드"] = df["성별"].map(
                 lambda g: women_class if g == "여성" else men_class)
-        if st.session_state.get("_bulk_msg"):
-            st.caption("✔ " + st.session_state["_bulk_msg"])
+            st.session_state["_bulk_g_msg"] = \
+                f"{int(mask.sum())}개 행을 '{to_gender}'으로 변경했습니다."
+        if st.session_state.get("_bulk_g_msg"):
+            st.caption("✔ " + st.session_state["_bulk_g_msg"])
+
+    with tab_c:
+        st.caption("키워드가 든 옵션의 색상코드를 한 번에 지정 "
+                   "(색상 인식 실패 행 보정에 유용)")
+        cc1, cc2, cc3 = st.columns([2, 2, 1])
+        kw_c = cc1.text_input("색상/옵션 키워드 (예: 단종, 카키, 밀리터리)",
+                              key="bulk_kw_c", placeholder="비우면 전체 대상")
+        color_pick = cc2.selectbox("→ 색상코드", color_options[1:], key="bulk_c")
+        if cc3.button("색상 적용", use_container_width=True, key="btn_c"):
+            mask = _kw_mask(kw_c)
+            code = color_pick.split(" | ")[0].strip()
+            name = color_pick.split(" | ")[1].strip() if " | " in color_pick else ""
+            df.loc[mask, "색상코드"] = code
+            df.loc[mask, "색상영문"] = name
+            # 상태 갱신(색상+사이즈 모두 있으면 OK)
+            df["상태"] = df.apply(
+                lambda r: "OK" if (r["색상코드"] and r["사이즈코드"]) else "확인필요",
+                axis=1)
+            st.session_state["_bulk_c_msg"] = \
+                f"{int(mask.sum())}개 행의 색상코드를 '{color_pick}'로 지정했습니다."
+        if st.session_state.get("_bulk_c_msg"):
+            st.caption("✔ " + st.session_state["_bulk_c_msg"])
 
     # 편집용 컬럼 추가
     df_edit = df.copy()
