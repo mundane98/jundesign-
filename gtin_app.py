@@ -182,7 +182,7 @@ DEFAULT_FIXED = {
 # ---------------------------------------------------------------------------
 def parse_option(raw):
     res = {"raw": raw, "gender": "", "color_kr": "", "color_en": "",
-           "size": "", "ok": True, "note": ""}
+           "color_raw": "", "size": "", "ok": True, "note": ""}
     if raw is None:
         res["ok"] = False
         res["note"] = "옵션명 없음"
@@ -234,6 +234,9 @@ def parse_option(raw):
     res["size"] = size
 
     # 색상: 남은 텍스트에서 한글 색상 토큰 탐색 (긴 것 우선)
+    #   color_kr/color_en = 코드 매핑용 대표색 1개.
+    #   color_raw = 사이즈·성별·메모를 뗀 원본 색상 문자열(상세상품명 표기용).
+    res["color_raw"] = s_clean.strip()
     color_kr = ""
     color_en = ""
     txt = s_clean.replace(" ", "")
@@ -244,6 +247,9 @@ def parse_option(raw):
             break
     res["color_kr"] = color_kr
     res["color_en"] = color_en
+    # 대표색을 못 잡았으면 color_raw도 신뢰 불가(숫자·잡토큰) → 비운다
+    if not color_en:
+        res["color_raw"] = ""
 
     # 판정
     if not size or size not in SHOE_SIZE2CODE:
@@ -290,6 +296,16 @@ def build_names(prod_name, maker_label, brand, maker_tag):
     model = " ".join(parts)
     detail = f"{maker_label} {brand} {model}".strip()
     return detail, model
+
+
+def detail_with_option(detail_base, color_kr, size):
+    """상세상품명 뒤에 색상·사이즈를 덧붙인다.
+    예: '준디자인 에버라스트 X-E J 죠깅' + '블랙' + '250'
+        → '준디자인 에버라스트 X-E J 죠깅 블랙 250'
+    색상이나 사이즈가 비어있으면 있는 것만 붙인다."""
+    suffix = " ".join(x for x in [str(color_kr or "").strip(),
+                                  str(size or "").strip()] if x)
+    return f"{detail_base} {suffix}".strip() if suffix else detail_base
 
 
 def decide_gender(parsed, women_max=245):
@@ -627,7 +643,7 @@ if up is not None and class_ready:
         if r["product"] not in target:
             continue
         p = parse_option(r["option"])
-        detail, model = build_names(r["product"], maker["label"], brand, maker["tag"])
+        detail_base, model = build_names(r["product"], maker["label"], brand, maker["tag"])
         color_code = COLOR_NAME2CODE.get(p["color_en"], "")
         size_code = SHOE_SIZE2CODE.get(p["size"], "")
         gender = decide_gender(p, women_max=women_max)
@@ -641,8 +657,10 @@ if up is not None and class_ready:
             "상품분류코드": class_code,
             "제조사명": maker["label"],
             "브랜드명": brand,
-            "상세상품명": detail,
+            "상세상품명기본": detail_base,
+            "상세상품명": detail_with_option(detail_base, p["color_raw"], p["size"]),
             "모델명": model,
+            "색상표기": p["color_raw"],
             "색상(인식)": p["color_kr"],
             "색상영문": p["color_en"],
             "색상코드": color_code,
@@ -705,7 +723,7 @@ if up is not None and class_ready:
     edited = st.data_editor(
         df_edit[["✓", "상품명", "옵션명", "상태", "성별", "분류_선택",
                  "상세상품명", "모델명",
-                 "색상(인식)", "색상코드_선택",
+                 "색상표기", "색상코드_선택",
                  "사이즈", "사이즈코드_선택", "메모"]],
         column_config={
             "✓": st.column_config.CheckboxColumn("✓", width="small",
@@ -715,6 +733,9 @@ if up is not None and class_ready:
             "분류_선택": st.column_config.SelectboxColumn(
                 "상품분류", options=[women_label, men_label] + all_labels,
                 width="large"),
+            "색상표기": st.column_config.TextColumn(
+                "색상표기", width="small",
+                help="상세상품명에 들어갈 색상 단어(예: 화이트그린). 직접 수정 가능."),
             "색상코드_선택": st.column_config.SelectboxColumn(
                 "색상코드", options=color_options, width="medium"),
             "사이즈코드_선택": st.column_config.SelectboxColumn(
@@ -725,7 +746,6 @@ if up is not None and class_ready:
             "메모": st.column_config.TextColumn(disabled=True),
             "상세상품명": st.column_config.TextColumn(disabled=True),
             "모델명": st.column_config.TextColumn(disabled=True),
-            "색상(인식)": st.column_config.TextColumn(disabled=True),
             "사이즈": st.column_config.TextColumn(disabled=True),
         },
         hide_index=True,
@@ -737,6 +757,7 @@ if up is not None and class_ready:
     # 에디터에서 편집·체크된 내용을 작업본(df)에 즉시 반영(편집 보존)
     df["✓"] = edited["✓"].values
     df["성별"] = edited["성별"].values
+    df["색상표기"] = edited["색상표기"].values
     df["색상코드"] = edited["색상코드_선택"].map(label2code).values
     df["사이즈코드"] = edited["사이즈코드_선택"].map(label2code).values
     # 색상영문도 코드에 맞춰 갱신
@@ -754,6 +775,12 @@ if up is not None and class_ready:
     df["상품분류코드"] = new_codes
     df["상태"] = df.apply(
         lambda r: "OK" if (r["색상코드"] and r["사이즈코드"]) else "확인필요", axis=1)
+    # 상세상품명 재계산: 기본형 + (색상 표기 원문) + (사이즈코드 기준 숫자)
+    def _recalc_detail(r):
+        color_word = r.get("색상표기") or r["색상(인식)"] or r["색상영문"]
+        size_txt = SHOE_CODE2SIZE.get(r["사이즈코드"], r["사이즈"])
+        return detail_with_option(r["상세상품명기본"], color_word, size_txt)
+    df["상세상품명"] = df.apply(_recalc_detail, axis=1)
     st.session_state["_work_df"] = df
 
     # 선택 행 일괄 적용 패널 -----------------------------------------------
@@ -789,14 +816,24 @@ if up is not None and class_ready:
                         lambda g: women_class if g == "여성" else men_class)
             if c_val != "(변경 안 함)":
                 code = label2code(c_val)
+                cname = COLOR_CODE2NAME.get(code, "")
                 df.loc[m, "색상코드"] = code
-                df.loc[m, "색상영문"] = COLOR_CODE2NAME.get(code, "")
+                df.loc[m, "색상영문"] = cname
+                df.loc[m, "색상(인식)"] = cname
+                # 일괄로 색을 바꾼 행은 상세상품명 색상표기도 이 색으로 동기화
+                df.loc[m, "색상표기"] = cname
             if s_val != "(변경 안 함)":
                 df.loc[m, "사이즈코드"] = label2code(s_val)
             if cls_val != "(변경 안 함)":
                 df.loc[m, "상품분류코드"] = classlabel2code(cls_val)
             df["상태"] = df.apply(
                 lambda r: "OK" if (r["색상코드"] and r["사이즈코드"]) else "확인필요",
+                axis=1)
+            df["상세상품명"] = df.apply(
+                lambda r: detail_with_option(
+                    r["상세상품명기본"],
+                    r.get("색상표기") or r["색상(인식)"] or r["색상영문"],
+                    SHOE_CODE2SIZE.get(r["사이즈코드"], r["사이즈"])),
                 axis=1)
             df["✓"] = False   # 적용 후 체크 해제
             st.session_state["_work_df"] = df
